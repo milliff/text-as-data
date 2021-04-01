@@ -318,4 +318,119 @@ Here, we're plotting the estimated difference in the document-level proportions 
 ## Final Thoughts
 There are a lot of other exciting things you can use STM to do, many of which start with specifying prevalence and content covariates in the model fit. For a content covariate, this is essentially saying: I want the vocabulary used to talk about a particular topic to vary as a function of some variable (say, party ID or treatment condition). For prevalence, this is saying: I want the estimated topic prevalence for a given topic to vary as a function of some covariate (say, time period). 
 
+# Supervised Classification
+
+A third way to approach text analysis is *supervised learning*. Supervised learning consists of creating a schema, labeling a portion of the documents, training a model on the set of labeled data, and finally applying the model to the rest of your corpus to generate labels for the unread documents. 
+
+A quick decision process can help you decide which technique to use:
+
+1. I know what I'm looking for and it's easily captured with a small set of words --> keyword methods
+2. I don't know what I'm looking for --> topic models
+3. I know what I'm looking for, and it's document labels --> supervised learning.
+
+(Note that text analysis projects can include all three steps: you might run a topic model to understand the corpus and help develop a coding scheme, use supervised learning to label documents, and finally use a dictionary to calculate differences in sentiment across your document classes).
+
+
+There are many, many approaches to doing document classification, but we're going to begin with a simple, regression-type setup that should be familiar. Our $y$ variable is the label, and $X$ is the same document-term matrix we constructed above in the STM step. We're using the occurrence of each word in a document to predict its label, by learning a weight for each word and summing the word effects to make the document label prediction.
+
+Because supervised learning models are so flexible and powerful, it's important to always test the model on a held-out set of data to make sure that the model isn't overfitting.
+
+```{r}
+X <- as.matrix(dtm)
+y <- as.integer(tweets$target == 0)
+
+split <- as.logical(rbinom(n = nrow(tweets), size=1, prob = 0.7))
+
+X_train <- X[split,]
+X_test <- X[!split,]
+
+y_train <- y[split]
+y_test <- y[!split]
+```
+
+For the model itself, we're going to use a lasso classifier from the `glmnet` package. Lasso is a form of regularized regression that has the effect of setting many coefficients to zero (see Quant IV for details).
+
+```{r}
+model <- glmnet::glmnet(x = X_train, y = y_train, alpha = 1, family="binomial")
+
+make_prediction <- function(s){
+  y_hat_prob <- predict(model, s=s, X_test, type="response")
+  # convert from continuous to binary
+  y_hat <- y_hat_prob > 0.5
+  # simple accuracy
+  acc <- mean(y_hat == y_test)
+  df <- data.frame(s=s, 
+                   acc=acc,
+                   mean_pred = mean(y_hat))
+  return(df)
+}
+```
+
+No text analysis technique gets you off the hook for analyzing and interpreting its results on your data.
+One of the parameters in lasso is a $\lambda$ parameter controlling how much weight to put on the regularization term that penalizes large coefficients, vs. on predicting individual point as accurately as possible.
+
+```{r}
+exp_vec <- seq(-15, 4, by=0.5)
+s_vec <- 10^exp_vec
+
+acc_vec <- lapply(s_vec, make_prediction)
+acc_df <- bind_rows(acc_vec)
+```
+
+We can plot the accuracy of the classifier as function of this regularization term. We immediately see that there's a pretty constant level of accuracy as the regularization increases, until the accuracy hits a peak and rapidly declines:
+
+```{r}
+ggplot(acc_df, aes(x = s, y = acc)) +
+  geom_point() +
+  ylim(0, 1) +
+  scale_x_log10()
+```
+
+Why does it do this? We can plot the proportion of predicted labels that are positive, which reveals that at a high enough level of regularization, the classifier just predicts the majority class, which is positive. Obviously, that's no good for us.
+
+```{r}
+ggplot(acc_df, aes(x = s, y = mean_pred)) +
+  geom_point() +
+  ylim(0, 1) + 
+  scale_x_log10()
+```
+
+But how do we decide which level of regularization to use within the stretch of comparable performance? Here's where the aim of the research project starts to matter. Besides document-level accuracy, you might also be interested in which words are predictive of disasters.
+
+With very little regularization, words have large effects and rare words that perfectly predict document labels have the largest effects.
+
+```{r}
+model_coefs <- as.data.frame(as.matrix(coef(model, s = 10^-10)))
+names(model_coefs) <- c("coef")
+model_coefs$word <- rownames(model_coefs)
+
+model_coefs %>% 
+  arrange(desc(abs(coef))) %>% 
+  head(5)
+```
+
+With regularization turned up slightly more, the results begin to look better and are surprising. Words that seem related to disasters have negative weights, meaning that their prescence in a document will lower its predicted probability of describing a disaster. (Thinking about this more, it starts to make sense: Hiroshima is a past disaster, and "spill" could easily mean coffee, not toxic chemicals). The only term in the top five that increases the probability of a disaster label is foxnewsinsid".
+
+```{r}
+model_coefs <- as.data.frame(as.matrix(coef(model, s = 10^-2)))
+names(model_coefs) <- c("coef")
+model_coefs$word <- rownames(model_coefs)
+
+model_coefs %>% 
+  arrange(desc(abs(coef))) %>% 
+  head(5)
+```
+
+
+With the regularization turned all the way up, all coefficients go to zero except the intercept, resulting in all documents having the same predictions.
+
+```{r}
+model_coefs <- as.data.frame(as.matrix(coef(model, s = 10^10)))
+names(model_coefs) <- c("coef")
+model_coefs$word <- rownames(model_coefs)
+
+model_coefs %>% 
+  arrange(desc(abs(coef))) %>% 
+  head(5)
+```
 
