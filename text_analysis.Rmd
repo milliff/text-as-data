@@ -1,0 +1,321 @@
+---
+title: "Introduction to Text Analysis"
+subtitle: "MIT Political Methodology Lab Workshop Series 2021"
+author: "Andy Halterman and Aidan Milliff"
+date: "2 April 2021"
+output: html_notebook
+---
+
+# Text Analysis in `R`
+
+Better off in Python for many things, but lots can be done in R.
+
+## The Research Question
+
+The "research question" in this demo is not a causal/descriptive question about politics *per se*, but it is plausibly a task you would have to do in order to start answering questions about politics. Lots of text analysis in social science is exactly this: tasks you have to do to transform, augment, or simplify text data into a state where you can start to ask and answer substantive political science questions. 
+
+<!-- Let's say we are interested in how political ideology ID affects the way people respond to disasters. We have chosen to answer this question using text data, for some reason. We go to Twitter's new free [academic API](https://developer.twitter.com/en/solutions/academic-research) and use it to vacuum up a bunch of tweets that include some "disaster-y" keywords.^[OK, so our question already changed twice. First to "how does political ideology affect the way people write/talk about disasters?" Second, to "how does political ideology affect the way that Twitter users write about disasters in the particular register they use on social media?" Pay attention to these little mutations. They add up...]  -->
+
+We have a `.csv` of ~7,500 tweets, which are nominally about disasters of some type. We now at a pretty common starting point for text analysis. We have used Twitter's new free [academic API](https://developer.twitter.com/en/solutions/academic-research) to get a bunch of data that we think pertain to a research question, but our initial process of gathering probably wasn't as precise as we want. One issue we know our data have is metaphors and hyperbole. We want to identify people who are talking about *real* disasters, not disasters like a laptop crashing or calamities like spilling coffee on yourself. Text analysis tools can help with this. 
+
+## The Tools
+
+We're going to use three different tools to process and analyze the same text. With each, we're pursuing the nominal "goal" of separating out the tweets that are about actual disasters.
+
+### Sentiment Analysis (Supervised)
+
+### Topic Modeling (Unsupervised)
+
+### Logit Classification (Supervised)
+
+## The Data
+
+Our dataframe contains 7,613 unique tweets. For each tweet, we have a unique ID, the text, and a binary indicator (`target`) which takes a value of 1 if the tweet is about a real "disaster", and a zero otherwise. Some tweets also have a location. Many have a "keyword."
+
+```{r loading}
+# Load necessary packages
+
+if (!require(tidyverse)) install.packages('tidyverse'); suppressMessages(library(tidyverse))# loads ggplot2, tibble, tidyr, readr, purr, dplyr, stringr, forcats
+if (!require(tidytext)) install.packages('tidytext'); suppressMessages(library(tidytext)) # Our sentiment analysis package
+if (!require(textdata)) install.packages('textdata'); suppressMessages(library(textdata)) # Provides our sentiment analysis dictionary
+if (!require(stm)) install.packages('stm'); suppressMessages(library(stm)) # Structural topic model package
+if (!require(tm)) install.packages('tm'); suppressMessages(library(tm)) # Another topic model package (for data cleaning)
+if (!require(glmnet)) install.packages('glmnet'); suppressMessages(library(glmnet)) # Our logit classifier package
+if (!require(textdata)) install.packages('textdata'); suppressMessages(library(textdata)) # Provides our sentiment analysis dictionary
+# Load data
+tweets <- read_csv("train.csv") # Make sure the text is read as characters, not factors.
+summary(tweets)
+tweets %>% select(c(target,text)) %>% sample_n(10)
+```
+
+# Sentiment Analysis
+
+There are a lot of packages to do sentiment analysis of different types. We are using `tidytext`, which is a popular package for exploring text data that, as the name suggests, is built to work well with the `tidyverse`. 
+
+Like most common sentiment analysis approaches, `tidytext` approaches a document as a combination of it's constituent words, and the document's sentiment as a combination of the sentiments of each word it contains---often just a running total of positive and negative words. To measure the sentiments of individual words, `tidytext` uses dictionaries, which assign positive/negative sentiment scores to individual words. Dictionary-based methods can be used for a bunch of things besides sentiment, so the code here can be repurposed to measure all sorts of other things that are captured in custom or off-the-shelf dictionaries.
+
+The first step for sentiment analysis is converting our documents (tweets) into series of tokens (words or $n$-grams) that can get their own sentiment scores. We will use unigrams/single words because the sentiment dictionaries use unigrams as well. `tidytext` uses the same "data grammar" as the rest of the tidyverse, so each token will get its own row, and the columns will include attributes like the document to which it belongs.
+
+```{r, echo=TRUE}
+tidy_tweets <- tweets %>% 
+  unnest_tokens(token, # the name of the destination column
+                text, # the name of the source column
+                to_lower= F, # lowercasing, might drop URLS from tweets
+                token = "tweets") # by-word tokenization, but preserves usernames, hashtags, urls that would get dropped with default tokenization
+dim(tidy_tweets)
+head(tidy_tweets, 20)
+```
+
+Now it's time to pick a dictionary that matches tokens with sentiments. There are many options that can be called from `tidytext` with the `get_sentiments()` function. We'll start with the `NRC` dictionary by [Mohammad and Tunney](http://saifmohammad.com/WebPages/`NRC`-Emotion-Lexicon.htm). Let's first download the dictionary and look at what it provides.
+
+```{r}
+get_sentiments("nrc")
+```
+
+The `NRC` dictionary has a lot more than positive and negative! It also associates words with particular emotions, which we may want to do. In this case, though, we're just going to use the "positive" and "negative" sentiments in the dictionary. 
+
+To apply the dictionary to our tweet data, we're just going to do a big "inner join." This will leave us with a `tbl` with a row for each positive and negative token that appears in a tweet, at which point we just need to calculate some tweet-level statistics.
+
+```{r}
+tweets_nrc <- tidy_tweets %>% 
+  inner_join(get_sentiments("nrc") %>% 
+               filter(sentiment %in% c("positive", "negative")),
+             by = c("token" = "word"))
+```
+
+Before we analyze our sentiment scores, let's take a look at what happened.
+
+```{r}
+dim(tweets_nrc)
+head(tweets_nrc, 20)
+```
+
+Notice how much smaller the "scored" data frame is? Only 7% of the tokens in `tidy_tweets` matched an entry in the `NRC` dictionary. And only `r round(length(unique(tweets_nrc$id))/length(unique(tidy_tweets$id)),2)*100`% of the tweets are scored at all. For shorter documents like tweets, dictionaries just have a mechanically lower probability of giving you any measurement at all.
+
+Whether or not the result is "better," would another dictionary at least measure the sentiment in more tweets? Let's try the `bing` lexicon by [Bing Liu et al.](https://www.cs.uic.edu/~liub/FBS/sentiment-analysis.html), another dictionary included in `tidytext` which scores more words than `NRC`.
+
+```{r}
+tweets_bing <- tidy_tweets %>% 
+  inner_join(get_sentiments("bing"),
+             by = c("token" = "word"))
+```
+
+Alas, this only scores `r round(length(unique(tweets_bing$id))/length(unique(tidy_tweets$id)),2)*100`% of the tweets. Let's use both anyway to see how they compare. Our goal is to calculate a "sentiment score" for each tweet, which is just going to be the count of positive tokens minus the count of negative tokens.
+
+```{r}
+# NRC
+scores_nrc <- tweets_nrc %>% 
+  group_by(id) %>% 
+  pivot_wider(names_from = sentiment,
+              values_from = token,
+              values_fn = list(token = length),
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# bing
+
+scores_bing <- tweets_bing %>% 
+  group_by(id) %>% 
+  pivot_wider(names_from = sentiment,
+              values_from = token,
+              values_fn = list(token = length),
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+
+```
+
+Before we actually look to see if sentiment has helped us identify "disaster" tweets, let's just see how the different dictionaries compare to each other. We'll look only at the tweets that were scored by both.
+
+```{r}
+scores_compare <- scores_nrc %>% select(c(id, positive, negative, sentiment, target)) %>% inner_join(scores_bing %>% select(c(id, positive, negative, sentiment, target)), by = "id", suffix = c(".nrc", ".bing"))
+
+
+ggplot(scores_compare, aes(x = sentiment.bing, y = sentiment.nrc)) +
+  geom_bin2d(bins = 14) + 
+  scale_fill_continuous(type = "viridis") +
+  geom_abline(slope = 1) + 
+  coord_fixed() + 
+  xlim(c(-7,7)) +
+  ylim(c(-7,7)) + 
+  theme_bw() +
+  labs(title = "NRC vs. Bing Sentiment Scores")
+  
+cor(scores_compare$sentiment.bing, scores_compare$sentiment.nrc)
+```
+
+The two scores are clearly positively correlated, though the correlation coefficient is only `r round(cor(scores_compare$sentiment.bing, scores_compare$sentiment.nrc),3)`. The plot also suggests that the center of mass for sentiment scores in our tweet corpus is, intuitively, below zero. It would be puzzling if a corpus of tweets nominally about disasters was more positive than negative!
+
+OK, on to our actual goal: does sentiment tell us much about the disaster content of the tweets? Let's just start by comparing sentiment scores of tweets that are/not actually about disaster.
+
+```{r}
+plot <- bind_rows(scores_nrc %>% mutate(dict = "NRC"),
+                  scores_bing %>% mutate(dict = "Bing et al."))
+ggplot(plot, aes(x = factor(target), y = sentiment, fill = dict)) + 
+  geom_boxplot() + 
+  stat_summary(fun.y=mean, geom="point", shape=23, size=4) +
+  facet_wrap(~dict) +
+  theme_bw() +
+  labs(title = "Sentiment Scores for Disaster/non-Disaster Tweets",
+       subtitle = "Using NRC and Bing et al. Sentiment Dictionaries",
+       fill= "Dictionary",
+       y = "Sentiment Score",
+       x = "Disaster Tweet?")
+  
+```
+
+Plot looks pretty good! The "mass" of sentiment scores looks higher for the non-disaster tweets than for the actual disaster tweets. But is it really that good? The medians are quite close together even though the distributions are different. Let's do some simple t-tests to be sure.
+
+```{r}
+t.test(scores_nrc$sentiment[which(scores_nrc$target == 1)],
+       scores_nrc$sentiment[which(scores_nrc$target == 0)])
+t.test(scores_bing$sentiment[which(scores_bing$target == 1)],
+       scores_bing$sentiment[which(scores_bing$target == 0)])
+```
+
+That looks good too. There's a pretty convincing difference in means, but we've hardly got perfect separation. Why is that? Whether or not a tweet is actually about a disaster depends a lot on context. Sentiment scoring as we used it explicity ignores context. NRC, for example, would assign a positive value to the word "shelter" whether it occured in a tweet quoting Bob Dylan lyrics ("I'll give ya shelter from the storm"), or a tweet about wildfires ("firefighters were forced to deploy their fire shelters"). That's potentially a problem. Let's just look at some extreme sentiment scores on our tweets as a little closing reminder about the limitations that come with dictionary methods. We'll use NRC scores for this.
+
+```{r}
+scored_tweets <- tweets %>% inner_join(scores_nrc %>% select(c(id, sentiment)), by = "id") 
+positives <- scored_tweets %>% select(c(text, sentiment, target)) %>% filter(sentiment > quantile(sentiment,.9)) %>% sample_n(5) 
+negatives <- scored_tweets %>% select(c(text, sentiment, target)) %>% filter(sentiment < quantile(sentiment,.1)) %>% sample_n(5)
+
+positives
+negatives
+```
+
+# Topic Modeling
+
+Ahhh the topic model. Invented when most of us were in elementary school, but re-popularized by an excellent implementation and user-friendly `R` package written by political scientists in the 2010s! Topic models are *unsupervised* models, which are useful for creating summaries ("low-dimensional representations") of your text data. With few exceptions (c.f. ongoing work by Eshima, Imai, and Sasaki (!)) unsupervised models do not let you give input into *how* the model summarizes your text. The summaries are also kind of unstable. Here's a very quick work-along for the Structural Topic Model (STM, Roberts, Stewart, and Tingley, 2018).
+
+## Preparing the Data
+
+Unlike dictionary based methods in which we could just do string matching, topic modeling requires that we start by getting our documents represented as vectors. The `stm` package makes this very easy. All you need to give it is a dataframe where one column is the texts and other colums are metadata/covariates. It converts the texts to a document-term matrix representation where each document is a row vector of length $v$ where $v$ is the size of the vocabulary, i.e. number of unique tokens in the whole corpus of documents. The $k^{th}$ element of the row vector takes a value of 0 if term $k$ does not appear in the document, a value of 1 if it appears once, and so on.
+
+```{r}
+processed <- textProcessor(tweets$text, metadata = cbind.data.frame(tweets$keyword, tweets$target))
+```
+
+Check out the representation of our tweets in the format produced by the `textProcessor()` function from `stm`.
+
+```{r}
+tweets$text[1]
+rbind(processed$vocab[processed$documents$`1`[1,]],processed$documents$`1`)
+```
+Any ideas why they look so different?
+
+Let's repeat the process with `tm` (the `textProcessor()` function is just a wrapper around these steps) to see how we get from the raw text to that vector.
+
+```{r}
+text <- Corpus(VectorSource(tweets$text)) # This just puts our texts in a nested list, basically 
+text[[1]][[1]]
+prep <- tm_map(text, content_transformer(tolower)) # puts everything in lowercase. This is a modeling choice that makes WOW and wow the same word.
+prep[[1]][[1]]
+prep <- tm_map(prep, stripWhitespace) # gets rid of leading or trailing junk
+prep[[1]][[1]]
+prep <- tm_map(prep, removePunctuation) # Drops punctuation. On twitter, this turns hashtags into plain old words
+prep[[1]][[1]]
+prep <- tm_map(prep, removeNumbers) # Similar to above
+prep <- tm_map(prep, removeWords, stopwords(kind = "en")) # Drops extremely common "nuisance" words. We can talk more about this. 
+prep[[1]][[1]]
+prep <- tm_map(prep, stemDocument) # Trim words down to their "stems" to make words like forgiving, forgive, forgives, forgivness the same
+prep[[1]][[1]]
+dtm <- DocumentTermMatrix(prep) # Coerce stemmed documents into a DTM
+as.matrix(dtm)[1:2,c(1:13)]
+```
+
+Note that while the remaining stems appear in order in that DTM, the model won't respect the order. 
+
+Next, STM asks for another pre-processing step before we can start fitting the model.
+
+```{r}
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+```
+
+
+This single command does a lot of stuff! The main thing is it drops terms (and sometimes whole documents as a result) that appear super infrequently or super frequently. Neither are actually useful for the model.
+
+## Fitting a Model
+
+Now that the text is pre-processed, there are a few decisions we need to make to fit the model. We're not going to go through them here, but the `stm` [vignette](https://cran.r-project.org/web/packages/stm/vignettes/stmVignette.pdf) is a good primer (see Sec. 3.4 especially), and these modeling decisions are important to understand if you want to use topic modeling. 
+
+Let's "fit" a model. This model is on the faster end of STM fits, but still takes a while, so let's just look at the syntax, and then load a model object that's already provided. 
+
+```{r}
+# mod <- stm(out$documents, # Documents from the prep function
+           # out$vocab, # Vocab from same function
+           # K=10) # Number of topics. Lots of ways to pick, including some empirical ways described in the package documentation.
+                # We're ignoring prevalence covariates, which actually makes this just a correlated topic model, but this shows you how to do the steps at least. 
+# save(mod, file="stm.RData")
+load("stm.RData")
+```
+
+## Labeling Topics
+
+How do you analyze a topic model? It requires some work, and some decision-making that you want to document and prepare to justify See Grimmer and Stewart ([2013](https://www.cambridge.org/core/journals/political-analysis/article/text-as-data-the-promise-and-pitfalls-of-automatic-content-analysis-methods-for-political-texts/F7AAC8B2909441603FEB25C156448F20)) for more on the how and why of those decisions. 
+
+The first step is just to inspect the topics that our model yields for coherence and content. Remember, STM is identifying clusters of *words* that appear together, and hoping that because of the way human language works, the co-occurrence of words means those documents are communicating a particular idea, or topic. The topics are not guaranteed to be coherent. One very common mistake when analyzing a topic model is trusting that the model's topics must mean *something* and then shoe-horning meaning onto an incoherent pile of words. 
+
+How should we figure out what (if anything) topics mean? We can start by just displaying the top words associated with each topic. 
+
+```{r}
+labelTopics(mod)
+```
+
+The STM vignette describes the different weighting schemes that are used to produce the ``top stems.'' I like FREX, becuase it weights words by their overall frequency, but also their exclusivity to the topic. 
+
+We're now at another common stumbling block. Many topic model users scrutinize this output to decide whether the topics are coherent and what they mean. This is not recommended, because we're still looking at individual words out of context, not the documents we are trying to understand. Best practice for labeling Topic Model topics involves reading the documents most strongly associated with each topic, and then using your own judgment to assign a "name" to the underlying topic that those documents are discussing. Doubleplusgood practice would be to save those 'top documents' and put them in an appendix so that readers and reviewers can look at the same information and decide for themselves whether they agree with your labeling. The `stm` package has a function that will help us.
+
+```{r}
+topdocs_n10 <- findThoughts(mod, texts = tweets$text[-out$docs.removed], n= 10)
+print(topdocs_n10)
+```
+
+This finds us the top ten documents associated with each of our ten topics. The same function can focus in on only specific topics, and can return more documents. More is often better to make sure the labels are really what you want. 
+
+Lots of these topics are pretty bad quality, as in it's hard to say what binds together all the top documents. . If we were doing this for a research project, we might go back and tinker with the model parameters more to get something better. For now, let's slap some labels on and go through the rest of the motions.
+
+We'll just focus on topics 2 and 10 for now. Topic 10 seems to be about "computers" more or less, and Topic 2 seems to be about "explosions," but once again, this model has not worked outstandingly (this happens a fair amount).
+
+## Analyzing the Model
+
+Now that we have topics, what do we do?
+
+STM allows us to analyze the results of the model in a number of ways.
+
+The first, and simplest is descriptive. Perhaps we really are just looking for a low-dimensional summary of a bunch of text. We can just look at topic prevalences across the corpus to find out what topics are discussed more or less.
+
+```{r}
+plot(mod, type = "summary")
+```
+
+This S3 method in the `stm` package gives you something to start with, but best practice is to label the topics with the names you have chosen to describe them.
+
+Another way to use the topic model is to show topic correlations. This is a measure of what topics are discussed *together* in a single document. This is a great opportunity to look for qualitative evidence consistent with a theoretical framework or a descriptive expectation, but remember, since you can't specify ahead of time what the topics are going to be, it's risky to design research expecting that you will have a model with useful topics that reflect particular concepts of interest.
+
+```{r}
+plot(topicCorr(mod,cutoff = .05))
+```
+
+This plotting method shows us a graph where topics (nodes) are connected by a dashed line (edge) if they are positively correlated with a correlation coefficient > 0.05. We can interpret this to say, for example, that documents talking about explosions are not likely to be talking about computers, since no edge links topic 2 and topic 10. This makes sense, which is a good sign!
+
+One thing the STM package does not natively support is visualizing negative topic correlations. For some research questions and some model fits, it can be substantively useful to know when topics are *substitutes* or negatively correlated within documents. If you want to do this you can take the output of the `topic.Corr()` function and plot it with graph visualization packages like `ggraph`, `corrviz` or `igraph`, rather than the S3 plot method.
+
+Finally, STM supports estimation of linear models where document-level topic prevalence is the response variable. This is a cool feature, because it allows you to estimate the association between the ideas or topics included in the document with a variety of other things you may have measured at the document level (often something to do with the characteristics of the author or source). Some cool applications of topic modeling to survey responses (see Roberts et al. ([2014](https://onlinelibrary.wiley.com/doi/abs/10.1111/ajps.12103)), analyzing data from Gadarian and Albertson ([2014](https://onlinelibrary.wiley.com/doi/abs/10.1111/pops.12034))) estimate the association between an author's treatment condition in a survey experiement and the contents (in topic prevalence terms) of the repsonses they produce. Here, we'll do something more prosaic because we have few other available variables at the document level. We'll just see whether our ``label" (whether the tweet is about a real disaster) is associated with the prevalence of Topic 10 (computers) and Topic 2 (explosions).
+
+```{r}
+target_effect <- estimateEffect(c(2, 10) ~ `tweets$target`, mod, meta = out$meta)
+```
+
+The very neat feature of this step is the uncertainty estimation. By default it calculates standard errors that propagate forward the uncertainty from the model fit (i.e. it does not treat the topic prevalences as perfectly measured). Let's see what we got.
+
+```{r}
+plot(target_effect, covariate = 'tweets$target', method= "difference", cov.value1 = 1, cov.value2 = 0)
+```
+
+Here, we're plotting the estimated difference in the document-level proportions of Topic 10 and Topic 2 that is associated with whether or not hte tweet is actuall about a disaster. We see that tweets that are actually about disasters have higher proportions of Topic 2, and lower proportions of Topic 10. This makes sense again. That's good!
+
+## Final Thoughts
+There are a lot of other exciting things you can use STM to do, many of which start with specifying prevalence and content covariates in the model fit. For a content covariate, this is essentially saying: I want the vocabulary used to talk about a particular topic to vary as a function of some variable (say, party ID or treatment condition). For prevalence, this is saying: I want the estimated topic prevalence for a given topic to vary as a function of some covariate (say, time period). 
+
+
